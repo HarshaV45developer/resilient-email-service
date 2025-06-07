@@ -1,0 +1,60 @@
+in this project in have 2 API'S :
+1st is sending Api'S
+2nd is Status Api's
+
+
+sending Api: http://localhost:3000/api/emails/send 
+
+use "Post" Method
+
+{
+  "to": "test-customer@example.com",
+  "from": "service@project.com",
+  "subject": "Testing the Resilience",
+  "body": "Test to see retry and fallback."
+}
+
+
+In Postman: 202 Accepted The response body will look like this:
+
+{
+    "message": "Email has been accepted for processing.",
+    "status": "QUEUED",
+    ...
+    "idempotencyKey": "my-unique-test-12345"
+}
+
+
+In Your Terminal 🖥️ view:
+
+
+// First, job queue in going
+[EmailService] Email with key 'my-unique-test-12345' has been queued.
+
+// after, processing start ayyindi
+[EmailService] Processing key 'my-unique-test-12345'. Status set to PENDING.
+
+// Attempt 1 fail 
+[ProviderA] FAILED to send email.
+[EmailService] Attempt 1 with ProviderA failed...
+
+// after some time, Attempt 2 kuda fail ayyindi
+[ProviderA] FAILED to send email.
+[EmailService] Attempt 2 with ProviderA failed...
+
+// again fail 
+[EmailService] Attempt 3 with ProviderA failed...
+
+// No longer because of the primary provider, fallback start ayyindi
+[EmailService] Primary provider failed. Falling back to ProviderB.
+
+// Fallback provider to SUCCESS!
+[ProviderB] Email sent successfully!
+[EmailService] SUCCESS: Email sent via fallback provider ProviderB.
+
+
+
+
+Status Api : http://localhost:3000/api/emails/status/my-unique-test-12345
+
+here using "Get" Method we can check the "status" data
