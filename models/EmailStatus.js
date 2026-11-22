@@ -24,6 +24,16 @@ const EmailStatusSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    // Full email payload persistence for reliable restarts
+    from: {
+      type: String,
+    },
+    subject: {
+      type: String,
+    },
+    body: {
+      type: String,
+    },
     // A record of the last error message if the status is FAILED.
     errorMessage: {
       type: String,

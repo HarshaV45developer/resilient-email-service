@@ -14,7 +14,7 @@ class EmailService {
     this.rateLimitPeriod = 10000; // per 10 seconds
     this.requestTimestamps = [];
 
-    // --- NEW: Re-populate the queue on startup for resilience ---
+    // --- Re-populate the queue on startup for resilience ---
     this._rehydrateQueue();
 
     // Start the queue processor automatically.
@@ -40,22 +40,38 @@ class EmailService {
     }
 
     // 2. QUEUEING: If it's a new request, create a record in the DB and add to the in-memory queue.
-    // Note: We create the full email object here to pass to _rehydrateQueue if needed
-    const newStatus = await EmailStatus.create({
-      idempotencyKey,
-      status: 'QUEUED',
-      to: email.to,
-    });
+    try {
+      const newStatus = await EmailStatus.create({
+        idempotencyKey,
+        status: 'QUEUED',
+        to: email.to,
+        from: email.from,
+        subject: email.subject,
+        body: email.body,
+      });
 
-    // Pass the full email details along with the status record
-    this.emailQueue.push({ email, statusRecord: newStatus });
-    console.log(`[EmailService] Email with key '${idempotencyKey}' has been queued.`);
+      // Pass the full email details along with the status record
+      this.emailQueue.push({ email, statusRecord: newStatus });
+      console.log(`[EmailService] Email with key '${idempotencyKey}' has been queued.`);
 
-    return {
-      message: 'Email has been accepted for processing.',
-      status: 'QUEUED',
-      id: newStatus._id,
-    };
+      return {
+        message: 'Email has been accepted for processing.',
+        status: 'QUEUED',
+        id: newStatus._id,
+      };
+    } catch (err) {
+      // Handle potential race condition if two identical keys arrived concurrently
+      if (err.code === 11000) {
+        console.log(`[EmailService] Concurrent race caught for idempotency key '${idempotencyKey}'.`);
+        const existing = await EmailStatus.findOne({ idempotencyKey });
+        return {
+          message: 'Request already processed.',
+          status: existing ? existing.status : 'QUEUED',
+          id: existing ? existing._id : null,
+        };
+      }
+      throw err;
+    }
   }
 
   /**
@@ -139,8 +155,12 @@ class EmailService {
             primaryError = error; // Store the last error from primary
             throw new Error(`Primary provider failed after ${retries + 1} attempts.`);
           }
-          // 5. EXPONENTIAL BACKOFF: Wait before the next retry.
-          const waitTime = baseDelay * Math.pow(2, attempt - 1);
+          // 5. EXPONENTIAL BACKOFF WITH JITTER: Wait before the next retry.
+          // Jitter (random variation) prevents retry storms / thundering herd problem.
+          const backoff = baseDelay * Math.pow(2, attempt - 1);
+          const jitter = Math.floor(Math.random() * 200); // 0-200ms random jitter
+          const waitTime = backoff + jitter;
+          console.log(`[EmailService] Backoff wait: ${waitTime}ms (backoff: ${backoff}ms, jitter: ${jitter}ms) before retry attempt ${attempt + 1}...`);
           await delay(waitTime);
         }
       }
@@ -158,7 +178,6 @@ class EmailService {
         // If the fallback also fails, mark the job as FAILED.
         console.error('[EmailService] FATAL: Fallback provider also failed.', secondaryError.message);
         currentStatusRecord.status = 'FAILED';
-        // --- MODIFIED: Include both primary and secondary errors for better debugging ---
         currentStatusRecord.errorMessage = `Primary Error: ${primaryError.message || 'N/A'}. Fallback Error: ${secondaryError.message}`;
         currentStatusRecord.provider = this.secondaryProvider.getName();
         await currentStatusRecord.save();
@@ -167,9 +186,8 @@ class EmailService {
   }
 
   /**
-   * --- NEW METHOD ---
    * Finds unfinished jobs in the DB on startup and adds them to the queue.
-   * This makes the service resilient to restarts.
+   * This makes the service resilient to restarts without losing real payload.
    * @private
    */
   async _rehydrateQueue() {
@@ -181,10 +199,12 @@ class EmailService {
 
       if (unfinishedJobs.length > 0) {
         for (const job of unfinishedJobs) {
-            // We need the original email payload which isn't stored in EmailStatus model.
-            // For this mock, we'll recreate a simplified email object.
-            // In a real app, you'd store the full payload or a reference to it.
-            const email = { to: job.to, from: 'rehydrated@system.com', subject: 'Re-queued Email', body: 'This email was re-queued after a service restart.' };
+            const email = {
+              to: job.to,
+              from: job.from || 'rehydrated@system.com',
+              subject: job.subject || 'Re-queued Email',
+              body: job.body || 'This email was re-queued after a service restart.',
+            };
             
             this.emailQueue.push({ email, statusRecord: job });
         }
@@ -194,8 +214,6 @@ class EmailService {
       }
     } catch (error) {
       console.error('[EmailService] CRITICAL: Failed to rehydrate queue from database.', error);
-      // Depending on the desired behavior, you might want to exit the process
-      // process.exit(1);
     }
   }
 }
